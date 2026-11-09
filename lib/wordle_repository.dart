@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
@@ -14,6 +15,7 @@ class WordResult {
 class WordleRepository {
   static const _dbAssetPath = 'assets/wordlist.db';
   static const _dbFileName = 'wordlist.db';
+  static const _fingerprintFileName = 'wordlist.db.fingerprint';
 
   Database? _db;
 
@@ -23,18 +25,40 @@ class WordleRepository {
 
     final docsDir = await getApplicationDocumentsDirectory();
     final dbPath = p.join(docsDir.path, _dbFileName);
+    final fingerprintFile = File(p.join(docsDir.path, _fingerprintFileName));
 
-    if (!await File(dbPath).exists()) {
-      final bytes = await rootBundle.load(_dbAssetPath);
-      await File(dbPath).writeAsBytes(
-        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-        flush: true,
-      );
+    // The bundled word list is copied into app storage on first use. An app
+    // update keeps that storage, so without a check the app would keep reading
+    // the old copy and never see newly added words. Compare a fingerprint of
+    // the bundled database with the one recorded at the last copy, and
+    // re-copy whenever the bundled list has changed.
+    final bytes = await rootBundle.load(_dbAssetPath);
+    final data =
+        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes);
+    final fingerprint = _fingerprint(data);
+    final storedFingerprint = await fingerprintFile.exists()
+        ? (await fingerprintFile.readAsString()).trim()
+        : null;
+
+    if (!await File(dbPath).exists() || storedFingerprint != fingerprint) {
+      await File(dbPath).writeAsBytes(data, flush: true);
+      await fingerprintFile.writeAsString(fingerprint, flush: true);
     }
 
     final db = await openDatabase(dbPath, readOnly: true);
     _db = db;
     return db;
+  }
+
+  /// Cheap content fingerprint (byte length + 32-bit FNV-1a hash) used to
+  /// tell whether the bundled database differs from the stored copy.
+  static String _fingerprint(Uint8List data) {
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < data.length; i++) {
+      hash ^= data[i];
+      hash = (hash * 0x01000193) & 0xFFFFFFFF;
+    }
+    return '${data.length}:${hash.toRadixString(16)}';
   }
 
   Future<List<WordResult>> getGuesses({
